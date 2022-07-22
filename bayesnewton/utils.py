@@ -104,6 +104,8 @@ def predict_from_state(x_test, ind, x, post_mean, post_cov, gain, kernel):
     """
     wrapper function to vectorise predict_at_t_()
     """
+    # print(f'x_test is {x_test.shape}, ind is {ind.shape}, mean is {post_mean.shape}, cov is {post_cov.shape}, gain is {gain.shape}')
+
     predict_from_state_func = vmap(
         predict_from_state_, (0, 0, None, None, None, None, None)
     )
@@ -128,6 +130,8 @@ def temporal_conditional(X, X_test, mean, cov, gain, kernel):
     """
     predict from time X to time X_test give state mean and covariance at X
     """
+    # print(f'Inside the temporal conditional')
+    # print(f'X is {X.shape}, X_test is {X_test.shape}, mean is {mean.shape}, cov is {cov.shape}, gain is {gain.shape}')
     Pinf = kernel.stationary_covariance()[None, ...]
     minf = np.zeros([1, Pinf.shape[1], 1])
     mean_aug = np.concatenate([minf, mean, minf])

@@ -172,11 +172,13 @@ def process_noise_covariance(A, Pinf):
 def _sequential_kf(As, Qs, H, ys, noise_covs, m0, P0, masks, return_predict=False):
 
     def body(carry, inputs):
+        #prediction step
         y, A, Q, obs_cov, mask = inputs
         m, P, ell = carry
         m_ = A @ m
         P_ = A @ P @ A.T + Q
 
+        #Update step
         obs_mean = H @ m_
         HP = H @ P_
         S = HP @ H.T + obs_cov

@@ -3,7 +3,7 @@ from jax import vmap
 import jax.numpy as np
 from jax.scipy.linalg import cho_factor, cho_solve, block_diag, expm
 from jax.ops import index_add, index
-from .utils import scaled_squared_euclid_dist, softplus, softplus_inv, rotation_matrix
+from .utils import square_distance, scaled_squared_euclid_dist, softplus, softplus_inv, rotation_matrix
 from warnings import warn
 
 
@@ -42,7 +42,6 @@ class Kernel(objax.Module):
         F = self.feedback_matrix()
         A = expm(F * dt)
         return A
-
 
 class StationaryKernel(Kernel):
     """ """
@@ -603,13 +602,13 @@ class SpatioTemporalKernel(Kernel):
         Qzz = cho_solve((Lzz, low), np.eye(self.M))  # K_zz^(-1)
         return Qzz, Lzz
 
-    def stationary_covariance(self):
+    def stationary_covariance(self, num_loc=None):
         """
         Compute the covariance of the stationary state distribution. Since the latent components are independent
         under the prior, this is a block-diagonal matrix
         """
         Pinf_time = self.temporal_kernel.stationary_covariance()
-        Pinf = np.kron(np.eye(self.M), Pinf_time)
+        Pinf = np.kron(np.eye(self.M), Pinf_time) if num_loc is None else np.kron(np.eye(num_loc), Pinf_time)
         return Pinf
 
     def stationary_covariance_meanfield(self):
@@ -620,23 +619,27 @@ class SpatioTemporalKernel(Kernel):
         Pinf = np.tile(Pinf_time, [self.M, 1, 1])
         return Pinf
 
-    def measurement_model(self):
+    def measurement_model(self,  num_loc=None):
         """
         Compute the spatial conditional, i.e. the measurement model projecting the state x(t) to function space
             f(t, R) = H x(t)
         """
         H_time = self.temporal_kernel.measurement_model()
-        H = np.kron(np.eye(self.M), H_time)
+        # print(H_time.shape)
+        H = np.kron(np.eye(self.M), H_time) if num_loc is None else np.kron(np.eye(num_loc), H_time)
+
         return H
 
-    def state_transition(self, dt):
+    def state_transition(self, dt, num_loc=None):
         """
         Calculation of the discrete-time state transition matrix A = expm(FΔt) for the spatio-temporal prior.
         :param dt: step size(s), Δtₙ = tₙ - tₙ₋₁ [scalar]
         :return: state transition matrix A
         """
         A_time = self.temporal_kernel.state_transition(dt)
-        A = np.kron(np.eye(self.M), A_time)
+        A = np.kron(np.eye(self.M), A_time) if num_loc is None else np.kron(np.eye(num_loc), A_time)
+        # A = np.kron(np.eye(10), A_time)
+
         return A
 
     def state_transition_meanfield(self, dt):
@@ -972,28 +975,44 @@ class QuasiPeriodicMatern12(Kernel):
         self.igrid = np.meshgrid(np.arange(self.order + 1), np.arange(self.order + 1))[
             1
         ]
-        factorial_mesh_K = np.array(
-            [
-                [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
-                [6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0],
-                [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0],
-                [120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0],
-                [720.0, 720.0, 720.0, 720.0, 720.0, 720.0, 720.0],
-            ]
-        )
-        b = np.array(
-            [
-                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                [2.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 6.0, 0.0, 2.0, 0.0, 0.0, 0.0],
-                [6.0, 0.0, 8.0, 0.0, 2.0, 0.0, 0.0],
-                [0.0, 20.0, 0.0, 10.0, 0.0, 2.0, 0.0],
-                [20.0, 0.0, 30.0, 0.0, 12.0, 0.0, 2.0],
-            ]
-        )
+        if self.order == 6:
+            factorial_mesh_K = np.array(
+                [
+                    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                    [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+                    [6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0],
+                    [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0],
+                    [120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0],
+                    [720.0, 720.0, 720.0, 720.0, 720.0, 720.0, 720.0],
+                ]
+            )
+            b = np.array(
+                [
+                    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    [2.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+                    [0.0, 6.0, 0.0, 2.0, 0.0, 0.0, 0.0],
+                    [6.0, 0.0, 8.0, 0.0, 2.0, 0.0, 0.0],
+                    [0.0, 20.0, 0.0, 10.0, 0.0, 2.0, 0.0],
+                    [20.0, 0.0, 30.0, 0.0, 12.0, 0.0, 2.0],
+                ]
+            )
+        elif self.order == 2:
+            factorial_mesh_K = np.array(
+                [
+                    [1.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                    [2.0, 2.0, 2.0]
+                ]
+            )
+            b = np.array(
+                [[1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                 [2.0, 0.0, 2.0]])
+        else:
+            raise NotImplementedError
+
         self.b_fmK_2igrid = b * (1.0 / factorial_mesh_K) * (2.0**-self.igrid)
 
     @property
@@ -1012,8 +1031,12 @@ class QuasiPeriodicMatern12(Kernel):
     def period(self):
         return softplus(self.transformed_period.value)
 
-    def K(self, X, X2):
-        raise NotImplementedError
+    def K(self, X, X2 ):
+        r_per = np.pi * np.sqrt(np.maximum(square_distance(X, X2), 1e-36)) / self.period
+        k_per = np.exp(-0.5 * np.square(np.sin(r_per) / self.lengthscale_periodic))
+        r_mat = np.sqrt(np.maximum(scaled_squared_euclid_dist(X, X2, self.lengthscale_matern), 1e-36))
+        k_mat12 = np.exp(-r_mat)
+        return self.variance * k_mat12 * k_per
 
     def kernel_to_state_space(self, R=None):
         var_p = 1.0
@@ -1045,15 +1068,25 @@ class QuasiPeriodicMatern12(Kernel):
         Qc = np.kron(Qc_m, Pinf_p)
         H = np.kron(H_m, H_p)
         # Pinf = np.kron(Pinf_m, Pinf_p)
-        Pinf = block_diag(
-            np.kron(Pinf_m, q2[0] * np.eye(2)),
-            np.kron(Pinf_m, q2[1] * np.eye(2)),
-            np.kron(Pinf_m, q2[2] * np.eye(2)),
-            np.kron(Pinf_m, q2[3] * np.eye(2)),
-            np.kron(Pinf_m, q2[4] * np.eye(2)),
-            np.kron(Pinf_m, q2[5] * np.eye(2)),
-            np.kron(Pinf_m, q2[6] * np.eye(2)),
-        )
+        if self.order == 6:
+            Pinf = block_diag(
+                np.kron(Pinf_m, q2[0] * np.eye(2)),
+                np.kron(Pinf_m, q2[1] * np.eye(2)),
+                np.kron(Pinf_m, q2[2] * np.eye(2)),
+                np.kron(Pinf_m, q2[3] * np.eye(2)),
+                np.kron(Pinf_m, q2[4] * np.eye(2)),
+                np.kron(Pinf_m, q2[5] * np.eye(2)),
+                np.kron(Pinf_m, q2[6] * np.eye(2)),
+            )
+
+        elif self.order ==2:
+            Pinf = block_diag(
+                np.kron(Pinf_m, q2[0] * np.eye(2)),
+                np.kron(Pinf_m, q2[1] * np.eye(2)),
+                np.kron(Pinf_m, q2[2] * np.eye(2)),
+            )
+        else:
+            raise NotImplementedError
         return F, L, Qc, H, Pinf
 
     def stationary_covariance(self):
@@ -1067,15 +1100,25 @@ class QuasiPeriodicMatern12(Kernel):
         )
         q2 = np.sum(a, axis=0)
         Pinf_m = np.array([[self.variance]])
-        Pinf = block_diag(
-            np.kron(Pinf_m, q2[0] * np.eye(2)),
-            np.kron(Pinf_m, q2[1] * np.eye(2)),
-            np.kron(Pinf_m, q2[2] * np.eye(2)),
-            np.kron(Pinf_m, q2[3] * np.eye(2)),
-            np.kron(Pinf_m, q2[4] * np.eye(2)),
-            np.kron(Pinf_m, q2[5] * np.eye(2)),
-            np.kron(Pinf_m, q2[6] * np.eye(2)),
-        )
+        if self.order == 6:
+            Pinf = block_diag(
+                np.kron(Pinf_m, q2[0] * np.eye(2)),
+                np.kron(Pinf_m, q2[1] * np.eye(2)),
+                np.kron(Pinf_m, q2[2] * np.eye(2)),
+                np.kron(Pinf_m, q2[3] * np.eye(2)),
+                np.kron(Pinf_m, q2[4] * np.eye(2)),
+                np.kron(Pinf_m, q2[5] * np.eye(2)),
+                np.kron(Pinf_m, q2[6] * np.eye(2)),
+            )
+
+        elif self.order ==2:
+            Pinf = block_diag(
+                np.kron(Pinf_m, q2[0] * np.eye(2)),
+                np.kron(Pinf_m, q2[1] * np.eye(2)),
+                np.kron(Pinf_m, q2[2] * np.eye(2)),
+            )
+        else:
+            raise NotImplementedError
         return Pinf
 
     def measurement_model(self):
@@ -1097,13 +1140,19 @@ class QuasiPeriodicMatern12(Kernel):
         R0 = rotation_matrix(dt, harmonics[0])
         R1 = rotation_matrix(dt, harmonics[1])
         R2 = rotation_matrix(dt, harmonics[2])
-        R3 = rotation_matrix(dt, harmonics[3])
-        R4 = rotation_matrix(dt, harmonics[4])
-        R5 = rotation_matrix(dt, harmonics[5])
-        R6 = rotation_matrix(dt, harmonics[6])
-        A = np.exp(-dt / self.lengthscale_matern) * block_diag(
-            R0, R1, R2, R3, R4, R5, R6
-        )
+        if self.order == 2:
+            A = np.exp(-dt / self.lengthscale_matern) * block_diag(
+                R0, R1, R2)
+        elif self.order == 6:
+            R3 = rotation_matrix(dt, harmonics[3])
+            R4 = rotation_matrix(dt, harmonics[4])
+            R5 = rotation_matrix(dt, harmonics[5])
+            R6 = rotation_matrix(dt, harmonics[6])
+            A = np.exp(-dt / self.lengthscale_matern) * block_diag(
+                R0, R1, R2, R3, R4, R5, R6
+            )
+        else:
+            raise NotImplementedError
         return A
 
     def feedback_matrix(self):
@@ -1138,6 +1187,8 @@ class QuasiPeriodicMatern32(Kernel):
         lengthscale_matern=1.0,
         order=6,
     ):
+        self.period_value = period
+        self.lengthscale_matern_value = lengthscale_matern
         self.transformed_lengthscale_periodic = objax.TrainVar(
             np.array(softplus_inv(lengthscale_periodic))
         )
@@ -1152,30 +1203,46 @@ class QuasiPeriodicMatern32(Kernel):
         self.igrid = np.meshgrid(np.arange(self.order + 1), np.arange(self.order + 1))[
             1
         ]
-        factorial_mesh_K = np.array(
-            [
-                [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
-                [6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0],
-                [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0],
-                [120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0],
-                [720.0, 720.0, 720.0, 720.0, 720.0, 720.0, 720.0],
-            ]
-        )
-        b = np.array(
-            [
-                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                [2.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 6.0, 0.0, 2.0, 0.0, 0.0, 0.0],
-                [6.0, 0.0, 8.0, 0.0, 2.0, 0.0, 0.0],
-                [0.0, 20.0, 0.0, 10.0, 0.0, 2.0, 0.0],
-                [20.0, 0.0, 30.0, 0.0, 12.0, 0.0, 2.0],
-            ]
-        )
-        self.b_fmK_2igrid = b * (1.0 / factorial_mesh_K) * (2.0**-self.igrid)
+        if self.order == 6:
+            factorial_mesh_K = np.array(
+                [
+                    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                    [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+                    [6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0],
+                    [24.0, 24.0, 24.0, 24.0, 24.0, 24.0, 24.0],
+                    [120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0],
+                    [720.0, 720.0, 720.0, 720.0, 720.0, 720.0, 720.0],
+                ]
+            )
+            b = np.array(
+                [
+                    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    [2.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+                    [0.0, 6.0, 0.0, 2.0, 0.0, 0.0, 0.0],
+                    [6.0, 0.0, 8.0, 0.0, 2.0, 0.0, 0.0],
+                    [0.0, 20.0, 0.0, 10.0, 0.0, 2.0, 0.0],
+                    [20.0, 0.0, 30.0, 0.0, 12.0, 0.0, 2.0],
+                ]
+            )
+        elif self.order == 2:
+            factorial_mesh_K = np.array(
+                [
+                    [1.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                    [2.0, 2.0, 2.0]
+                ]
+            )
+            b = np.array(
+                [[1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                 [2.0, 0.0, 2.0]])
 
+        else:
+            raise NotImplementedError
+
+        self.b_fmK_2igrid = b * (1.0 / factorial_mesh_K) * (2.0 ** -self.igrid)
     @property
     def variance(self):
         return softplus(self.transformed_variance.value)
@@ -1192,8 +1259,27 @@ class QuasiPeriodicMatern32(Kernel):
     def period(self):
         return softplus(self.transformed_period.value)
 
+    # def K_r(self, r):
+    #     sqrt3 = np.sqrt(3.0)
+    #     return self.variance * (1.0 + sqrt3 * r) * np.exp(-sqrt3 * r)
+
     def K(self, X, X2):
-        raise NotImplementedError
+        '''
+        Sean Nassimiha 11/07
+        WHY DOES THE FUNCTION REACH THIS? SHOULDN'T IT USE THE MARKOVIAN FORM?
+        '''
+        # r = np.pi * (X - X2.T) / self.period_value  ###CHANGE THIS
+        # scaled_sine = np.sin(r) / self.lengthscale_matern_value
+        # sine_r2 = np.sum(scaled_sine**2, axis=-1)
+        # K = self.K_r(sine_r2)
+        # return K
+
+        r_per = np.pi * np.sqrt(np.maximum(square_distance(X, X2), 1e-36)) / self.period
+        k_per = np.exp(-0.5 * np.square(np.sin(r_per) / self.lengthscale_periodic))
+        sqrt3 = np.sqrt(3.0)
+        r_mat = np.sqrt(np.maximum(scaled_squared_euclid_dist(X, X2, self.lengthscale_matern), 1e-36))
+        k_mat32 = (1.0 + sqrt3 * r_mat) * np.exp(-sqrt3 * r_mat)
+        return self.variance * k_mat32 * k_per
 
     def kernel_to_state_space(self, R=None):
         var_p = 1.0
@@ -1234,15 +1320,27 @@ class QuasiPeriodicMatern32(Kernel):
         Qc = np.kron(Qc_m, Pinf_p)
         H = np.kron(H_m, H_p)
         # Pinf = np.kron(Pinf_m, Pinf_p)
-        Pinf = block_diag(
-            np.kron(Pinf_m, q2[0] * np.eye(2)),
-            np.kron(Pinf_m, q2[1] * np.eye(2)),
-            np.kron(Pinf_m, q2[2] * np.eye(2)),
-            np.kron(Pinf_m, q2[3] * np.eye(2)),
-            np.kron(Pinf_m, q2[4] * np.eye(2)),
-            np.kron(Pinf_m, q2[5] * np.eye(2)),
-            np.kron(Pinf_m, q2[6] * np.eye(2)),
-        )
+
+        if self.order == 6:
+            Pinf = block_diag(
+                np.kron(Pinf_m, q2[0] * np.eye(2)),
+                np.kron(Pinf_m, q2[1] * np.eye(2)),
+                np.kron(Pinf_m, q2[2] * np.eye(2)),
+                np.kron(Pinf_m, q2[3] * np.eye(2)),
+                np.kron(Pinf_m, q2[4] * np.eye(2)),
+                np.kron(Pinf_m, q2[5] * np.eye(2)),
+                np.kron(Pinf_m, q2[6] * np.eye(2)),
+            )
+
+        elif self.order ==2:
+            Pinf = block_diag(
+                np.kron(Pinf_m, q2[0] * np.eye(2)),
+                np.kron(Pinf_m, q2[1] * np.eye(2)),
+                np.kron(Pinf_m, q2[2] * np.eye(2)),
+            )
+        else:
+            raise NotImplementedError
+
         return F, L, Qc, H, Pinf
 
     def stationary_covariance(self):
@@ -1261,15 +1359,26 @@ class QuasiPeriodicMatern32(Kernel):
                 [0.0, 3.0 * self.variance / self.lengthscale_matern**2.0],
             ]
         )
-        Pinf = block_diag(
-            np.kron(Pinf_m, q2[0] * np.eye(2)),
-            np.kron(Pinf_m, q2[1] * np.eye(2)),
-            np.kron(Pinf_m, q2[2] * np.eye(2)),
-            np.kron(Pinf_m, q2[3] * np.eye(2)),
-            np.kron(Pinf_m, q2[4] * np.eye(2)),
-            np.kron(Pinf_m, q2[5] * np.eye(2)),
-            np.kron(Pinf_m, q2[6] * np.eye(2)),
-        )
+
+        if self.order == 6:
+            Pinf = block_diag(
+                np.kron(Pinf_m, q2[0] * np.eye(2)),
+                np.kron(Pinf_m, q2[1] * np.eye(2)),
+                np.kron(Pinf_m, q2[2] * np.eye(2)),
+                np.kron(Pinf_m, q2[3] * np.eye(2)),
+                np.kron(Pinf_m, q2[4] * np.eye(2)),
+                np.kron(Pinf_m, q2[5] * np.eye(2)),
+                np.kron(Pinf_m, q2[6] * np.eye(2)),
+            )
+
+        elif self.order == 2:
+            Pinf = block_diag(
+                np.kron(Pinf_m, q2[0] * np.eye(2)),
+                np.kron(Pinf_m, q2[1] * np.eye(2)),
+                np.kron(Pinf_m, q2[2] * np.eye(2)),
+            )
+        else:
+            raise NotImplementedError
         return Pinf
 
     def measurement_model(self):
@@ -1292,11 +1401,16 @@ class QuasiPeriodicMatern32(Kernel):
         R0 = self.subband_mat32(dt, lam, harmonics[0])
         R1 = self.subband_mat32(dt, lam, harmonics[1])
         R2 = self.subband_mat32(dt, lam, harmonics[2])
-        R3 = self.subband_mat32(dt, lam, harmonics[3])
-        R4 = self.subband_mat32(dt, lam, harmonics[4])
-        R5 = self.subband_mat32(dt, lam, harmonics[5])
-        R6 = self.subband_mat32(dt, lam, harmonics[6])
-        A = np.exp(-dt * lam) * block_diag(R0, R1, R2, R3, R4, R5, R6)
+        if self.order == 2:
+            A = np.exp(-dt * lam) * block_diag(R0, R1, R2)
+        elif self.order == 6:
+            R3 = self.subband_mat32(dt, lam, harmonics[3])
+            R4 = self.subband_mat32(dt, lam, harmonics[4])
+            R5 = self.subband_mat32(dt, lam, harmonics[5])
+            R6 = self.subband_mat32(dt, lam, harmonics[6])
+            A = np.exp(-dt * lam) * block_diag(R0, R1, R2, R3, R4, R5, R6)
+        else:
+            raise NotImplementedError
         return A
 
     @staticmethod
@@ -1791,6 +1905,15 @@ class Periodic(Kernel):
     @property
     def period(self):
         return softplus(self.transformed_period.value)
+
+    def K(self, X, X2):
+        '''
+        Implementation by Sean Nassimiha 13/06
+        '''
+        r_per = np.pi * np.sqrt(np.maximum(square_distance(X, X2), 1e-36)) / self.period
+        k_per = np.exp(-0.5 * np.square(np.sin(r_per) / self.lengthscale))
+        return k_per
+
 
     def kernel_to_state_space(self, R=None):
         a = (

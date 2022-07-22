@@ -129,6 +129,7 @@ class BaseModel(objax.Module):
             mean=np.zeros([self.num_data, pseudo_lik_size, 1]),
             covariance=1e2 * np.tile(np.eye(pseudo_lik_size), [self.num_data, 1, 1])
         )
+
         self.posterior_mean = objax.StateVar(np.zeros([self.num_data, self.func_dim, 1]))
         self.posterior_variance = objax.StateVar(np.tile(np.eye(self.func_dim), [self.num_data, 1, 1]))
         self.ind = np.arange(self.num_data)
@@ -730,6 +731,7 @@ class MarkovGaussianProcess(BaseModel):
                                                    pseudo_var,
                                                    mask=self.mask_pseudo_y,  # mask has no effect here (loglik not used)
                                                    parallel=self.parallel)
+        # print(f'filter mean {filter_mean.shape} filter cov {filter_cov.shape}')
         dt = np.concatenate([self.dt[1:], np.array([0.0])], axis=0)
         smoother_mean, smoother_cov, gain = self.smoother(dt,
                                                           self.kernel,
@@ -737,13 +739,15 @@ class MarkovGaussianProcess(BaseModel):
                                                           filter_cov,
                                                           return_full=True,
                                                           parallel=self.parallel)
+        # print(f'smoother mean {smoother_mean.shape} filter cov {smoother_cov.shape} gain {gain.shape}')
 
         # add dummy states at either edge
         inf = 1e10 * np.ones_like(self.X[0, :1])
         X_aug = np.block([[-inf], [self.X[:, :1]], [inf]])
-
+        # print(f'X_aug is {X_aug.shape}, X is {X.shape}')
         # predict the state distribution at the test time steps:
         state_mean, state_cov = self.temporal_conditional(X_aug, X, smoother_mean, smoother_cov, gain, self.kernel)
+        # print(f'state mean {state_mean.shape} filter cov {state_cov.shape}')
         # extract function values from the state:
         H = self.kernel.measurement_model()
         if self.spatio_temporal:
@@ -754,11 +758,68 @@ class MarkovGaussianProcess(BaseModel):
             test_var = W @ state_cov @ transpose(W) + C
         else:
             test_mean, test_var = H @ state_mean, H @ state_cov @ transpose(H)
-
         # if np.squeeze(test_var).ndim > 2:  # deal with spatio-temporal case (discard spatial covariance)
         if self.spatio_temporal:  # deal with spatio-temporal case (discard spatial covariance)
             test_var = diag(np.squeeze(test_var))
         return np.squeeze(test_mean), np.squeeze(test_var)
+
+
+    def forecast(self, X=None, R=None, pseudo_lik_params=None):
+        """
+        predict at new test locations X
+        """
+        if X is None:
+            X = self.X
+        elif len(X.shape) < 2:
+            X = X[:, None]
+        if R is None:
+            R = X[:, 1:]
+        X = X[:, :1]  # take only the temporal component
+
+        if pseudo_lik_params is None:
+            pseudo_y, pseudo_var = self.compute_full_pseudo_lik()
+        else:
+            pseudo_y, pseudo_var = pseudo_lik_params  # this deals with the posterior sampling case
+        _, (filter_mean, filter_cov) = self.filter(self.dt,
+                                                   self.kernel,
+                                                   pseudo_y,
+                                                   pseudo_var,
+                                                   mask=self.mask_pseudo_y,  # mask has no effect here (loglik not used)
+                                                   parallel=self.parallel)
+
+        # add dummy states at either edge
+        inf = 1e10 * np.ones_like(self.X[0, :1])
+        X_aug = np.block([[-inf], [self.X[:, :1]], [inf]])
+
+        state_mean, state_cov = self.temporal_conditional(X_aug, X, filter_mean, filter_cov, None, self.kernel)
+
+        # dt = np.concatenate([self.dt[1:], np.array([0.0])], axis=0)
+        # smoother_mean, smoother_cov, gain = self.smoother(dt,
+        #                                                   self.kernel,
+        #                                                   filter_mean,
+        #                                                   filter_cov,
+        #                                                   return_full=True,
+        #                                                   parallel=self.parallel)
+        # # add dummy states at either edge
+        # inf = 1e10 * np.ones_like(self.X[0, :1])
+        # X_aug = np.block([[-inf], [self.X[:, :1]], [inf]])
+        #
+        # # predict the state distribution at the test time steps:
+        # state_mean, state_cov = self.temporal_conditional(X_aug, X, smoother_mean, smoother_cov, gain, self.kernel)
+        # # extract function values from the state:
+        # H = self.kernel.measurement_model()
+        # if self.spatio_temporal:
+        #     # TODO: if R is fixed, only compute B, C once
+        #     B, C = self.kernel.spatial_conditional(X, R)
+        #     W = B @ H
+        #     test_mean = W @ state_mean
+        #     test_var = W @ state_cov @ transpose(W) + C
+        # else:
+        #     test_mean, test_var = H @ state_mean, H @ state_cov @ transpose(H)
+        # # if np.squeeze(test_var).ndim > 2:  # deal with spatio-temporal case (discard spatial covariance)
+        # if self.spatio_temporal:  # deal with spatio-temporal case (discard spatial covariance)
+        #     test_var = diag(np.squeeze(test_var))
+        # return np.squeeze(test_mean), np.squeeze(test_var)
 
     def filter_energy(self):
         pseudo_y, pseudo_var = self.compute_full_pseudo_lik()
@@ -775,7 +836,7 @@ class MarkovGaussianProcess(BaseModel):
         filter_energy = -np.sum(vmap(self.likelihood.log_density)(self.Y, mean, var))
         return filter_energy
 
-    def prior_sample(self, num_samps=1, X=None, seed=0):
+    def prior_sample(self, num_samps=1, X=None, seed=0, num_loc = None):
         """
         Sample from the model prior f~N(0,K) multiple times using a nested loop.
         :param num_samps: the number of samples to draw [scalar]
@@ -788,13 +849,13 @@ class MarkovGaussianProcess(BaseModel):
             dt = self.dt
         else:
             dt = np.concatenate([np.array([0.0]), np.diff(np.sort(X))])
-        sd = self.state_dim
-        H = self.kernel.measurement_model()
-        Pinf = self.kernel.stationary_covariance()
-        As = vmap(self.kernel.state_transition)(dt)
+        sd = self.state_dim if num_loc is None else 2 * num_loc
+        H = self.kernel.measurement_model(num_loc)
+        Pinf = self.kernel.stationary_covariance(num_loc)
+        As = vmap(self.kernel.state_transition, in_axes=(0,None))(dt, num_loc)
         Qs = vmap(process_noise_covariance, [0, None])(As, Pinf)
         jitter = 1e-8 * np.eye(sd)
-        f0 = np.zeros([dt.shape[0], self.func_dim, 1])
+        f0 = np.zeros([dt.shape[0], self.func_dim, 1]) if num_loc is None else np.zeros([dt.shape[0], num_loc, 1])
 
         def draw_full_sample(carry_, _):
             f_sample_i, i = carry_
@@ -823,7 +884,7 @@ class MarkovGaussianProcess(BaseModel):
 
         return f_samples
 
-    def posterior_sample(self, X=None, num_samps=1, seed=0):
+    def posterior_sample(self, X=None, R=None, num_samps=1, num_loc = None, seed=0):
         """
         Sample from the posterior at the test locations.
         Posterior sampling works by smoothing samples from the prior using the approximate Gaussian likelihood
@@ -849,22 +910,46 @@ class MarkovGaussianProcess(BaseModel):
             X = np.concatenate([self.X, X])
             X, ind = np.unique(X, return_inverse=True)
             train_ind, test_ind = ind[:self.num_data], ind[self.num_data:]
-        post_mean, _ = self.predict(X)
-        prior_samp = self.prior_sample(X=X, num_samps=num_samps, seed=seed)  # sample at training locations
-        lik_chol = np.tile(cholesky(self.pseudo_likelihood.covariance, lower=True), [num_samps, 1, 1, 1])
+
+        if num_loc is not None:
+            assert num_loc == R.shape[1]
+
+        post_mean, _ = self.predict(X,R)
+        prior_samp = self.prior_sample(X=X, num_samps=num_samps, num_loc = num_loc, seed=seed)  # sample at training locations
+        if num_loc is not None:
+            pseudo_lik_size_loc = num_loc
+            pseudo_likelihood = GaussianDistribution(
+                mean=np.zeros([self.num_data, pseudo_lik_size_loc, 1]),
+                covariance=1e2 * np.tile(np.eye(pseudo_lik_size_loc), [self.num_data, 1, 1]))
+            # print(f'pseudo_like_cov is {pseudo_likelihood.covariance}')
+            # print(f'mean func is {np.zeros([self.num_data, pseudo_lik_size_loc, 1])}')
+            lik_chol = np.tile(cholesky(pseudo_likelihood.covariance, lower=True), [num_samps, 1, 1, 1])
+            # print(f'lik_chol is {lik_chol}')
+        else:
+            # print(f'pseudo_like_cov is {self.pseudo_likelihood.covariance}')
+            # print(f'mean func is {self.pseudo_likelihood.mean}')
+            lik_chol = np.tile(cholesky(self.pseudo_likelihood.covariance, lower=True), [num_samps, 1, 1, 1])
+            # print(f'lik_chol is {lik_chol}')
+
         gen = objax.random.Generator(seed)
         prior_samp_train = prior_samp[:, train_ind]
+
+        # print(f'prior_samp_train is {prior_samp_train.shape} lik_chol {lik_chol.shape} objax.random.normal(shape=prior_samp_train.shape, generator=gen) is {objax.random.normal(shape=prior_samp_train.shape, generator=gen).shape}')
         prior_samp_y = prior_samp_train + lik_chol @ objax.random.normal(shape=prior_samp_train.shape, generator=gen)
 
         def smooth_prior_sample(i, prior_samp_y_i):
-            smoothed_sample, _ = self.predict(X, pseudo_lik_params=(prior_samp_y_i, self.pseudo_likelihood.covariance))
+            smoothed_sample, _ = self.predict(X, R, pseudo_lik_params=(prior_samp_y_i, self.pseudo_likelihood.covariance))
             return i+1, smoothed_sample
 
         _, smoothed_samples = scan(f=smooth_prior_sample,
                                    init=0,
                                    xs=prior_samp_y)
-
-        return (prior_samp[..., 0, 0] - smoothed_samples + post_mean[None])[:, test_ind]
+        if self.spatio_temporal:
+            # print(f'prior_samp[...,  0] is {prior_samp[...,  0].shape} smoothed_samples is {smoothed_samples.shape} post_mean[None] is {post_mean[None].shape}')
+            posterior_sample = (prior_samp[...,  0] - smoothed_samples + post_mean[None])[:, test_ind]
+        else:
+            posterior_sample = (prior_samp[...,0,  0] - smoothed_samples + post_mean[None])[:, test_ind]
+        return posterior_sample
 
 
 MarkovGP = MarkovGaussianProcess
@@ -1125,6 +1210,7 @@ class MarkovMeanFieldGaussianProcess(MarkovGaussianProcess):
         TODO: THIS IS HERE TO HANDLE A BUG IN PREDICTIONS WHEN USING THE PARALLEL FILTER WITH MEAN-FIELD
               YET TO FIGURE OUT WHAT'S CAUSING IT - VERY STRANGE THAT IT'S ONLY AN ISSUE DURING PREDICTION
         """
+        # print('predicting here')
         if X is None:
             X = self.X
         elif len(X.shape) < 2:
@@ -1132,19 +1218,22 @@ class MarkovMeanFieldGaussianProcess(MarkovGaussianProcess):
         if R is None:
             R = X[:, 1:]
         X = X[:, :1]  # take only the temporal component
-
+        # print('computing pseudo lik')
         if pseudo_lik_params is None:
             pseudo_y, pseudo_var = self.compute_full_pseudo_lik()
         else:
             pseudo_y, pseudo_var = pseudo_lik_params  # this deals with the posterior sampling case
+        # print('executing filter')
         _, (filter_mean, filter_cov) = self.filter(self.dt,
                                                    self.kernel,
                                                    pseudo_y,
                                                    pseudo_var,
                                                    mask=self.mask_pseudo_y,  # mask has no effect here (loglik not used)
                                                    # parallel=self.parallel)
-                                                   parallel=False)  # TODO: <---------- can't use parallel here, WHY?!
+                                                   parallel=True)  # TODO: <---------- can't use parallel here, WHY?!
         dt = np.concatenate([self.dt[1:], np.array([0.0])], axis=0)
+        # print('executing smoother')
+        # print(f'the shapes are dt: {dt.shape}, filter mean {filter_mean.shape}, filter_cov {filter_cov.shape} ')
         smoother_mean, smoother_cov, gain = self.smoother(dt,
                                                           self.kernel,
                                                           filter_mean,
@@ -1152,15 +1241,17 @@ class MarkovMeanFieldGaussianProcess(MarkovGaussianProcess):
                                                           return_full=True,
                                                           parallel=self.parallel)
 
+        # print('completed smoother')
         # add dummy states at either edge
         inf = 1e10 * np.ones_like(self.X[0, :1])
         X_aug = np.block([[-inf], [self.X[:, :1]], [inf]])
-
+        # print('predicting the state distribution')
         # predict the state distribution at the test time steps:
         state_mean, state_cov = self.temporal_conditional(X_aug, X, smoother_mean, smoother_cov, gain, self.kernel)
         # extract function values from the state:
         H = self.kernel.measurement_model()
         if self.spatio_temporal:
+            # print('getting test_mean and test_var')
             # TODO: if R is fixed, only compute B, C once
             B, C = self.kernel.spatial_conditional(X, R)
             W = B @ H

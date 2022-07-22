@@ -1044,7 +1044,6 @@ class StudentsT(Likelihood, GeneralisedGaussNewtonMixin):
     def conditional_moments(self, f):
         return f, (self.scale ** 2) * (self.df / (self.df - 2.0)) * np.ones_like(f)
 
-
 class Beta(Likelihood, GeneralisedGaussNewtonMixin):
     """
     The Beta likelihood.
@@ -1074,6 +1073,7 @@ class Beta(Likelihood, GeneralisedGaussNewtonMixin):
             self.transformed_scale = objax.TrainVar(np.array(softplus_inv(scale)))
         super().__init__()
         self.name = 'Beta'
+
 
     @property
     def scale(self):
@@ -1127,7 +1127,7 @@ class Gamma(Likelihood, GeneralisedGaussNewtonMixin):
     def evaluate_log_likelihood(self, y, f):
         scale = self.link_fn(f)
         return np.squeeze(
-            -self.shape * np.log(scale)
+            - self.shape * np.log(scale)
             - gammaln(self.shape)
             + (self.shape - 1.0) * np.log(y)
             - y / scale
